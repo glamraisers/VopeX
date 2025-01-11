@@ -1,261 +1,248 @@
-import { 
-  PerformanceObserver, 
-  performance, 
-  PerformanceEntry 
-} from 'perf_hooks';
+import { eventBus } from './eventBusUtils';
+import { StorageUtils } from './storageUtils';
 
-export interface PerformanceMetric {
-  name: string;
-  duration: number;
-  startTime: number;
-  timestamp: number;
+export enum PerformanceMetricType {
+  RENDER = 'RENDER',
+  NETWORK = 'NETWORK',
+  INTERACTION = 'INTERACTION',
+  CUSTOM = 'CUSTOM'
 }
 
-export interface ResourceLoadMetric {
+export interface PerformanceEntry {
+  id: string;
+  type: PerformanceMetricType;
   name: string;
-  type: string;
+  startTime: number;
   duration: number;
-  transferSize: number;
+  timestamp: number;
+  metadata?: Record<string, any>;
 }
 
 export class PerformanceUtils {
-  // Measure function execution time
-  static measureExecutionTime<T>(
-    fn: (...args: any[]) => T, 
-    ...args: any[]
-  ): {
-    result: T;
-    executionTime: number;
-  } {
-    const start = performance.now();
-    const result = fn(...args);
-    const end = performance.now();
+  // Performance tracking storage
+  private static performanceEntries: PerformanceEntry[] = [];
+  
+  // Configuration
+  private static config = {
+    enabled: true,
+    maxEntries: 100,
+    reportInterval: 30000, // 30 seconds
+    performanceLoggingThreshold: {
+      render: 100, // ms
+      network: 500, // ms
+      interaction: 200 // ms
+    }
+  };
 
-    return {
-      result,
-      executionTime: end - start
-    };
+  // Configure performance monitoring
+  static configure(options: Partial<typeof PerformanceUtils.config>) {
+    this.config = { ...this.config, ...options };
+    
+    // Start periodic reporting
+    if (this.config.enabled) {
+      this.startPeriodicReporting();
+    }
   }
 
-  // Create performance marker
-  static mark(name: string): void {
-    performance.mark(`${name}-start`);
-  }
-
-  // Measure performance between marks
-  static measure(
+  // Start performance measurement
+  static start(
     name: string, 
-    startMark?: string, 
-    endMark?: string
-  ): PerformanceMetric {
-    try {
-      performance.measure(name, startMark, endMark);
-      
-      const entries = performance.getEntriesByName(name);
-      const lastEntry = entries[entries.length - 1];
+    type: PerformanceMetricType = PerformanceMetricType.CUSTOM,
+    metadata?: Record<string, any>
+  ): string {
+    if (!this.config.enabled) return '';
 
-      return {
-        name,
-        duration: lastEntry.duration,
-        startTime: lastEntry.startTime,
-        timestamp: Date.now()
+    const entryId = `perf-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    performance.mark(`${entryId}-start`);
+
+    return entryId;
+  }
+
+  // End performance measurement
+  static end(
+    entryId: string, 
+    additionalMetadata?: Record<string, any>
+  ): PerformanceEntry | null {
+    if (!this.config.enabled || !entryId) return null;
+
+    performance.mark(`${entryId}-end`);
+    
+    try {
+      performance.measure(
+        entryId, 
+        `${entryId}-start`, 
+        `${entryId}-end`
+      );
+
+      const measure = performance.getEntriesByName(entryId)[0];
+      
+      const entry: PerformanceEntry = {
+        id: entryId,
+        type: PerformanceMetricType.CUSTOM,
+        name: measure.name,
+        startTime: measure.startTime,
+        duration: measure.duration,
+        timestamp: Date.now(),
+        metadata: additionalMetadata
       };
+
+      // Check against performance thresholds
+      this.checkPerformanceThreshold(entry);
+
+      // Store performance entry
+      this.storePerformanceEntry(entry);
+
+      // Clean up marks and measures
+      performance.clearMarks(`${entryId}-start`);
+      performance.clearMarks(`${entryId}-end`);
+      performance.clearMeasures(entryId);
+
+      return entry;
     } catch (error) {
       console.warn('Performance measurement failed', error);
-      return {
-        name,
-        duration: 0,
-        startTime: 0,
-        timestamp: Date.now()
-      };
+      return null;
     }
   }
 
-  // Track resource loading performance
-  static trackResourceLoading(): Promise<ResourceLoadMetric[]> {
-    return new Promise((resolve) => {
-      const resourceMetrics: ResourceLoadMetric[] = [];
-
-      const observer = new PerformanceObserver((list) => {
-        const entries = list.getEntries();
-        
-        entries.forEach((entry) => {
-          if (entry.entryType === 'resource') {
-            resourceMetrics.push({
-              name: entry.name,
-              type: entry.initiatorType,
-              duration: entry.duration,
-              transferSize: (entry as PerformanceResourceTiming).transferSize
-            });
-          }
-        });
-
-        resolve(resourceMetrics);
-      });
-
-      observer.observe({ 
-        type: 'resource', 
-        buffered: true 
-      });
-    });
-  }
-
-  // Debounce function
-  static debounce<F extends (...args: any[]) => any>(
-    func: F, 
-    delay: number
-  ): (...args: Parameters<F>) => void {
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-
-    return (...args: Parameters<F>) => {
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-      }
-
-      timeoutId = setTimeout(() => {
-        func(...args);
-        timeoutId = null;
-      }, delay);
-    };
-  }
-
-  // Throttle function
-  static throttle<F extends (...args: any[]) => any>(
-    func: F, 
-    limit: number
-  ): (...args: Parameters<F>) => void {
-    let inThrottle: boolean;
+  // Check performance threshold
+  private static checkPerformanceThreshold(entry: PerformanceEntry): void {
+    const thresholds = this.config.performanceLoggingThreshold;
     
-    return (...args: Parameters<F>) => {
-      if (!inThrottle) {
-        func(...args);
-        inThrottle = true;
-        setTimeout(() => {
-          inThrottle = false;
-        }, limit);
+    let shouldLog = false;
+    let logLevel: 'warn' | 'error' = 'warn';
+
+    switch (entry.type) {
+      case PerformanceMetricType.RENDER:
+        shouldLog = entry.duration > thresholds.render;
+        break;
+      case PerformanceMetricType.NETWORK:
+        shouldLog = entry.duration > thresholds.network;
+        logLevel = 'error';
+        break;
+      case PerformanceMetricType.INTERACTION:
+        shouldLog = entry.duration > thresholds.interaction;
+        break;
+    }
+
+    if (shouldLog) {
+      eventBus.publish('performance:threshold_exceeded', {
+        entry,
+        level: logLevel
+      });
+    }
+  }
+
+  // Store performance entry
+  private static storePerformanceEntry(entry: PerformanceEntry): void {
+    // Maintain max entries
+    if (this.performanceEntries.length >= this.config.maxEntries) {
+      this.performanceEntries.shift();
+    }
+
+    this.performanceEntries.push(entry);
+  }
+
+  // Periodic performance reporting
+  private static startPeriodicReporting(): void {
+    setInterval(() => {
+      if (this.performanceEntries.length > 0) {
+        this.reportPerformanceMetrics();
       }
-    };
+    }, this.config.reportInterval);
   }
 
-  // Memory usage tracking
-  static getMemoryUsage(): {
-    total: number;
-    used: number;
-    free: number;
-  } {
-    if (typeof process !== 'undefined' && process.memoryUsage) {
-      const memoryUsage = process.memoryUsage();
-      return {
-        total: memoryUsage.heapTotal,
-        used: memoryUsage.heapUsed,
-        free: memoryUsage.heapTotal - memoryUsage.heapUsed
-      };
-    }
-
-    return {
-      total: 0,
-      used: 0,
-      free: 0
-    };
-  }
-
-  // Advanced performance profiling
-  static profile<T>(
-    fn: (...args: any[]) => T, 
-    options?: {
-      warmup?: number;
-      iterations?: number;
-    }
-  ): {
-    result: T;
-    averageTime: number;
-    iterations: number;
-  } {
-    const defaultOptions = {
-      warmup: 5,
-      iterations: 10
-    };
-
-    const mergedOptions = { ...defaultOptions, ...options };
-    const times: number[] = [];
-
-    // Warmup iterations
-    for (let i = 0; i < mergedOptions.warmup; i++) {
-      fn();
-    }
-
-    // Measured iterations
-    let result: T;
-    for (let i = 0; i < mergedOptions.iterations; i++) {
-      const start = performance.now();
-      result = fn();
-      const end = performance.now();
-      times.push(end - start);
-    }
-
-    const averageTime = times.reduce((a, b) => a + b, 0) / times.length;
-
-    return {
-      result,
-      averageTime,
-      iterations: mergedOptions.iterations
-    };
-  }
-
-  // Network latency measurement
-  static measureNetworkLatency(
-    url: string, 
-    options?: {
-      timeout?: number;
-      method?: 'GET' | 'HEAD';
-    }
-  ): Promise<number> {
-    const defaultOptions = {
-      timeout: 5000,
-      method: 'HEAD'
-    };
-
-    const mergedOptions = { ...defaultOptions, ...options };
-
-    return new Promise((resolve, reject) => {
-      const start = performance.now();
+  // Report performance metrics
+  private static reportPerformanceMetrics(): void {
+    try {
+      // Send performance entries to server or analytics service
+      const entries = [...this.performanceEntries];
       
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
-        controller.abort();
-        reject(new Error('Network request timed out'));
-      }, mergedOptions.timeout);
+      // Reset entries after reporting
+      this.performanceEntries = [];
 
-      fetch(url, {
-        method: mergedOptions.method,
-        signal: controller.signal
-      })
-        .then(() => {
-          clearTimeout(timeoutId);
-          const end = performance.now();
-          resolve(end - start);
-        })
-        .catch((error) => {
-          clearTimeout(timeoutId);
-          reject(error);
-        });
-    });
+      // You could integrate with your analytics service here
+      eventBus.publish('performance:metrics_report', entries);
+
+      // Optionally store in local storage for later analysis
+      StorageUtils.setItem('performance_metrics', entries, {
+        encrypted: false,
+        expires: 24 * 60 * 60 * 1000 // 24 hours
+      });
+    } catch (error) {
+      console.error('Performance reporting failed', error);
+    }
+  }
+
+  // Get performance statistics
+  static getPerformanceStats(): {
+    totalEntries: number;
+    averageDuration: number;
+    entries: PerformanceEntry[];
+  } {
+    const entries = [...this.performanceEntries];
+    
+    return {
+      totalEntries: entries.length,
+      averageDuration: entries.reduce((sum, entry) => sum + entry.duration, 0) / entries.length || 0,
+      entries
+    };
+  }
+
+  // Measure browser performance
+  static measureBrowserPerformance(): Record<string, any> {
+    const navigation = performance.getEntriesByType('navigation')[0];
+    const paint = performance.getEntriesByType('paint')[0];
+
+    return {
+      loadTime: navigation.loadEventEnd - navigation.startTime,
+      firstContentfulPaint: paint?.startTime || 0,
+      domInteractive: navigation.domInteractive - navigation.startTime,
+      timeToFirstByte: navigation.responseStart - navigation.startTime
+    };
   }
 }
 
-// Example usage
-const executionResult = PerformanceUtils.measureExecutionTime(
-  (a: number, b: number) => a + b, 
-  5, 
-  3
-);
-
-const debouncedFunction = PerformanceUtils.debounce(() => {
-  console.log('Debounced function called');
-}, 300);
-
-const profiledResult = PerformanceUtils.profile(() => {
-  // Some complex function to profile
-}, {
-  iterations: 20
+// Configure performance utils on startup
+PerformanceUtils.configure({
+  enabled: process.env.NODE_ENV === 'production',
+  maxEntries: 200,
+  performanceLoggingThreshold: {
+    render: 150,
+    network: 600,
+    interaction: 250
+  }
 });
+
+// Export utility
+export const performance = PerformanceUtils;
+
+// Example usage
+function expensiveOperation() {
+  const perfId = performance.start(
+    'expensive_operation', 
+    PerformanceMetricType.CUSTOM
+  );
+
+  // Simulate some work
+  for (let i = 0; i < 1000000; i++) {
+    Math.sqrt(i);
+  }
+
+  performance.end(perfId, { 
+    context: 'calculation', 
+    iterations: 1000000 
+  });
+}
+
+// Measure render performance
+function renderComponent() {
+  const perfId = performance.start(
+    'component_render', 
+    PerformanceMetricType.RENDER
+  );
+
+  // Render logic here
+
+  performance.end(perfId);
+}
