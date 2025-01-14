@@ -1,0 +1,9 @@
+/* lightTheme.css */
+body {
+  background-color: var(--light-color);
+  color: #000;
+}
+
+.app-header, .app-footer {
+  background-color: var(--primary-color);
+}
