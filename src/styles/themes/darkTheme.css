@@ -1,0 +1,9 @@
+/* darkTheme.css */
+body {
+  background-color: var(--dark-color);
+  color: #fff;
+}
+
+.app-header, .app-footer {
+  background-color: #222;
+}
